@@ -1,0 +1,53 @@
+name: UGC Approve/Reject
+on:
+  repository_dispatch:
+    types: [ugc_approve, ugc_reject]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract inputs
+        id: inp
+        run: |
+          echo "etype=$(jq -r '.action' <<<'${{ toJson(github.event) }}')" >> $GITHUB_OUTPUT
+          echo "job_id=$(jq -r '.client_payload.job_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+          echo "inbox_chat_id=$(jq -r '.client_payload.inbox_chat_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+          echo "inbox_message_id=$(jq -r '.client_payload.inbox_message_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+
+      - name: Remove keyboard in INBOX
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/editMessageReplyMarkup" \
+            -H 'content-type: application/json' \
+            -d "{\"chat_id\":${{ steps.inp.outputs.inbox_chat_id }},\"message_id\":${{ steps.inp.outputs.inbox_message_id }}}" >/dev/null
+
+      - name: Load job json
+        run: jq . jobs/${{ steps.inp.outputs.job_id }}.json || true
+
+      - name: Trigger Make integration (ИНТЕГРАЦИЯ ПРОК)
+        env:
+          HOOK: ${{ secrets.MAKE_INTEGRATION_WEBHOOK }}
+        run: |
+          curl -s -X POST "$HOOK" \
+            -H "x-action: ugc" \
+            -H "x-id: ${{ steps.inp.outputs.job_id }}" \
+            -H "content-type: application/json" \
+            -d @jobs/${{ steps.inp.outputs.job_id }}.json >/dev/null
+
+      - name: Update status
+        run: |
+          STATUS=${{ steps.inp.outputs.etype == 'ugc_approve' && 'approved' || 'rejected' }}
+          jq ".status=\"${STATUS}\" | .updated_at=(now|todate)" \
+             jobs/${{ steps.inp.outputs.job_id }}.json > /tmp/job.json
+          mv /tmp/job.json jobs/${{ steps.inp.outputs.job_id }}.json
+          git add jobs/${{ steps.inp.outputs.job_id }}.json
+          git commit -m "UGC ${STATUS}: ${{ steps.inp.outputs.job_id }}" || true
+          git push
