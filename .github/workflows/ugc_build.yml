@@ -1,0 +1,111 @@
+name: UGC Build
+on:
+  repository_dispatch:
+    types: [ugc_build]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract inputs
+        id: inp
+        run: |
+          echo "job_id=$(jq -r '.client_payload.job_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+
+      - name: Load job json
+        id: job
+        run: |
+          FILE="jobs/${{ steps.inp.outputs.job_id }}.json"
+          test -f "$FILE" || (echo "job file not found"; exit 1)
+          echo "text=$(jq -r '.payload.text // ""' "$FILE")" >> $GITHUB_OUTPUT
+          jq -r '.payload.media[] | "\(.type) \(.file_id)"' "$FILE" > /tmp/media.list || true
+          echo "draft_chat=${{ secrets.TG_DRAFT_CHAT_ID }}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg imagemagick jq
+
+      - name: Download media from Telegram
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        run: |
+          mkdir -p work/in work/out
+          i=0
+          while read -r TYPE ID; do
+            test -n "$ID" || continue
+            FP=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=$ID" | jq -r '.result.file_path')
+            URL="https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${FP}"
+            EXT="${FP##*.}"
+            SRC="work/in/${i}.${EXT}"
+            curl -s -o "$SRC" "$URL"
+            echo "$TYPE $SRC" >> /tmp/downloaded.list
+            i=$((i+1))
+          done < /tmp/media.list || true
+
+      - name: Simple overlays (demo)
+        run: |
+          mkdir -p work/out
+          while read -r TYPE SRC; do
+            if [ "$TYPE" = "photo" ]; then
+              DST="work/out/$(basename "${SRC%.*}").jpg"
+              convert "$SRC" -gravity south \
+                -fill white -undercolor "#00000080" -pointsize 36 \
+                -annotate +0+20 "ПроКис СВЕЖАК" "$DST"
+              echo "photo $DST" >> /tmp/out.list
+            else
+              DST="work/out/$(basename "${SRC%.*}").mp4"
+              ffmpeg -y -i "$SRC" -vf "drawtext=text='ПроКис СВЕЖАК':fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10:fontsize=28:x=(w-tw)/2:y=h-80" -c:a copy "$DST"
+              echo "video $DST" >> /tmp/out.list
+            fi
+          done < /tmp/downloaded.list || true
+
+      # (опционально) генерация текста/голоса — добавим позже отдельными шагами
+
+      - name: Send to DRAFT as album or single
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        run: |
+          COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
+          TEXT='${{ steps.job.outputs.text }}'
+          CHAT=${{ steps.job.outputs.draft_chat }}
+          if [ "$COUNT" -gt 1 ]; then
+            # sendMediaGroup
+            JSON=$(jq -n '[]')
+            i=0
+            while read -r TYPE PATH; do
+              CAP=""
+              if [ $i -eq 0 ]; then CAP="$TEXT"; fi
+              if [ "$TYPE" = "photo" ]; then
+                JSON=$(echo "$JSON" | jq --arg c "$CAP" --arg p "$PATH" '. + [{"type":"photo","media":"attach://f\(input_line_number)","caption":$c}]')
+              else
+                JSON=$(echo "$JSON" | jq --arg c "$CAP" --arg p "$PATH" '. + [{"type":"video","media":"attach://f\(input_line_number)","caption":$c}]')
+              fi
+              i=$((i+1))
+            done < /tmp/out.list
+
+            # собрать -F для всех файлов
+            CURL=(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" -F chat_id="$CHAT" -F media="$(echo "$JSON")")
+            i=1
+            while read -r _ PATH; do
+              CURL+=(-F "f${i}=@${PATH}")
+              i=$((i+1))
+            done < /tmp/out.list
+            "${CURL[@]}" >/dev/null
+          else
+            # одиночный
+            read -r TYPE PATH < /tmp/out.list || true
+            if [ "$TYPE" = "photo" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" >/dev/null
+            else
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" >/dev/null
+            fi
+          fi
