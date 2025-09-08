@@ -32,7 +32,7 @@ jobs:
 
       - name: Download media from Telegram
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}   # бот, получавший file_id
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
         run: |
           mkdir -p work/in work/out
           > /tmp/downloaded.list
@@ -72,32 +72,47 @@ jobs:
             done < /tmp/downloaded.list
           fi
 
-      # формируем media.json в отдельном Python-шаге (никаких heredoc в bash)
       - name: Build media JSON
-        shell: python
         run: |
-          import json, os, sys
-          text = open('/tmp/text.txt','r',encoding='utf-8').read().strip() if os.path.exists('/tmp/text.txt') else ''
-          lines = open('/tmp/out.list','r',encoding='utf-8').read().strip().splitlines() if os.path.exists('/tmp/out.list') else []
+          python3 - <<'PY'
+          import json, os
+          text = ''
+          if os.path.exists('/tmp/text.txt'):
+              with open('/tmp/text.txt','r',encoding='utf-8') as f: text = f.read().strip()
+          lines = []
+          if os.path.exists('/tmp/out.list'):
+              with open('/tmp/out.list','r',encoding='utf-8') as f:
+                  for line in f:
+                      parts = line.strip().split(' ',1)
+                      if len(parts)==2:
+                          lines.append((parts[0], parts[1]))
           items = []
-          for idx, line in enumerate(lines, start=1):
-              typ, path = line.split(' ', 1)
-              t = 'photo' if typ == 'photo' else 'video'
-              it = {'type': t, 'media': f'attach://f{idx}'}
-              if idx == 1 and text:
+          for i,(typ,path) in enumerate(lines, start=1):
+              t = 'photo' if typ=='photo' else 'video'
+              it = {'type': t, 'media': f'attach://f{i}'}
+              if i==1 and text:
                   it['caption'] = text
               items.append(it)
-          open('/tmp/media.json','w',encoding='utf-8').write(json.dumps(items, ensure_ascii=False))
+          with open('/tmp/media.json','w',encoding='utf-8') as f:
+              f.write(json.dumps(items, ensure_ascii=False))
+          # небольшая проверка
+          print("media.json bytes:", os.path.getsize('/tmp/media.json'))
+          PY
 
       - name: Send to DRAFT as album or single (via DRAFT bot)
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}   # бот, который постит в черновик
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
         run: |
+          set -euo pipefail
           CHAT="$DRAFT_CHAT"
           TEXT="$(cat /tmp/text.txt 2>/dev/null || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
+          echo "Prepared outputs: $(wc -l < /tmp/out.list 2>/dev/null || echo 0) item(s)"
+          ls -l /tmp/out.list /tmp/media.json 2>/dev/null || true
+
           if [ "$COUNT" -gt 1 ]; then
+            test -s /tmp/media.json || (echo "media.json missing for album"; exit 1)
             declare -a FILE_ARGS=()
             i=1
             while read -r TYPE PATH; do
@@ -105,19 +120,19 @@ jobs:
               i=$((i+1))
             done < /tmp/out.list
 
-            /usr/bin/curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
+            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
               -F chat_id="$CHAT" \
               -F "media=$(cat /tmp/media.json)" \
-              "${FILE_ARGS[@]}" >/dev/null
+              "${FILE_ARGS[@]}"
           else
             read -r TYPE PATH < /tmp/out.list || true
-            if [ "$TYPE" = "photo" ]; then
-              /usr/bin/curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" >/dev/null
-            elif [ "$TYPE" = "video" ]; then
-              /usr/bin/curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" >/dev/null
+            if [ "${TYPE:-}" = "photo" ]; then
+              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH"
+            elif [ "${TYPE:-}" = "video" ]; then
+              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH"
             else
-              echo "Nothing to send."
+              echo "Nothing to send (no outputs)."
             fi
           fi
