@@ -58,15 +58,11 @@ jobs:
             while read -r TYPE SRC; do
               if [ "$TYPE" = "photo" ]; then
                 DST="work/out/$(basename "${SRC%.*}").jpg"
-                convert "$SRC" -gravity south \
-                  -fill white -undercolor "#00000080" -pointsize 36 \
-                  -annotate +0+20 "ПроКис СВЕЖАК" "$DST"
+                convert "$SRC" -gravity south -fill white -undercolor "#00000080" -pointsize 36 -annotate +0+20 "ПроКис СВЕЖАК" "$DST"
                 echo "photo $DST" >> /tmp/out.list
               else
                 DST="work/out/$(basename "${SRC%.*}").mp4"
-                ffmpeg -y -i "$SRC" \
-                  -vf "drawtext=text='ПроКис СВЕЖАК':fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10:fontsize=28:x=(w-tw)/2:y=h-80" \
-                  -c:a copy "$DST"
+                ffmpeg -y -i "$SRC" -vf "drawtext=text='ПроКис СВЕЖАК':fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10:fontsize=28:x=(w-tw)/2:y=h-80" -c:a copy "$DST"
                 echo "video $DST" >> /tmp/out.list
               fi
             done < /tmp/downloaded.list
@@ -78,28 +74,32 @@ jobs:
           import json, os
           text = ''
           if os.path.exists('/tmp/text.txt'):
-              with open('/tmp/text.txt','r',encoding='utf-8') as f: text = f.read().strip()
+            with open('/tmp/text.txt','r',encoding='utf-8') as f: text = f.read().strip()
           lines = []
           if os.path.exists('/tmp/out.list'):
-              with open('/tmp/out.list','r',encoding='utf-8') as f:
-                  for line in f:
-                      parts = line.strip().split(' ',1)
-                      if len(parts)==2:
-                          lines.append((parts[0], parts[1]))
+            with open('/tmp/out.list','r',encoding='utf-8') as f:
+              for line in f:
+                p = line.strip().split(' ',1)
+                if len(p)==2: lines.append((p[0], p[1]))
           items = []
           for i,(typ,path) in enumerate(lines, start=1):
-              t = 'photo' if typ=='photo' else 'video'
-              it = {'type': t, 'media': f'attach://f{i}'}
-              if i==1 and text:
-                  it['caption'] = text
-              items.append(it)
+            t = 'photo' if typ=='photo' else 'video'
+            it = {'type': t, 'media': f'attach://f{i}'}
+            if i==1 and text: it['caption'] = text
+            items.append(it)
           with open('/tmp/media.json','w',encoding='utf-8') as f:
-              f.write(json.dumps(items, ensure_ascii=False))
-          # небольшая проверка
+            f.write(json.dumps(items, ensure_ascii=False))
           print("media.json bytes:", os.path.getsize('/tmp/media.json'))
           PY
 
+      - name: Normalize line endings (CRLF→LF)
+        run: |
+          for f in /tmp/text.txt /tmp/media.list /tmp/downloaded.list /tmp/out.list /tmp/media.json; do
+            [ -f "$f" ] && sed -i 's/\r$//' "$f" || true
+          done
+
       - name: Send to DRAFT as album or single (via DRAFT bot)
+        shell: bash
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
         run: |
@@ -108,31 +108,30 @@ jobs:
           TEXT="$(cat /tmp/text.txt 2>/dev/null || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
-          echo "Prepared outputs: $(wc -l < /tmp/out.list 2>/dev/null || echo 0) item(s)"
+          echo "Prepared outputs: ${COUNT} item(s)"
           ls -l /tmp/out.list /tmp/media.json 2>/dev/null || true
 
           if [ "$COUNT" -gt 1 ]; then
-            test -s /tmp/media.json || (echo "media.json missing for album"; exit 1)
-            declare -a FILE_ARGS=()
+            [ -s /tmp/media.json ] || { echo "media.json missing"; exit 1; }
+            MEDIA_JSON="$(cat /tmp/media.json)"
+            FILE_ARGS=()
             i=1
-            while read -r TYPE PATH; do
+            while IFS=' ' read -r TYPE PATH; do
               FILE_ARGS+=(-F "f${i}=@${PATH}")
               i=$((i+1))
             done < /tmp/out.list
-
-            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
-              -F chat_id="$CHAT" \
-              -F "media=$(cat /tmp/media.json)" \
-              "${FILE_ARGS[@]}"
+            # shellcheck disable=SC2068
+            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" -F chat_id="$CHAT" -F "media=$MEDIA_JSON" ${FILE_ARGS[@]}
           else
-            read -r TYPE PATH < /tmp/out.list || true
-            if [ "${TYPE:-}" = "photo" ]; then
-              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH"
-            elif [ "${TYPE:-}" = "video" ]; then
-              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH"
+            if read -r TYPE PATH < /tmp/out.list; then
+              if [ "${TYPE}" = "photo" ]; then
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH"
+              elif [ "${TYPE}" = "video" ]; then
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH"
+              else
+                echo "Nothing to send."
+              fi
             else
-              echo "Nothing to send (no outputs)."
+              echo "Nothing to send."
             fi
           fi
