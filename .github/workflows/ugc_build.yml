@@ -98,7 +98,7 @@ jobs:
             [ -f "$f" ] && sed -i 's/\r$//' "$f" || true
           done
 
-      - name: Send to DRAFT as album or single (via DRAFT bot)
+      - name: Send to DRAFT as album or single (with keyboard)
         shell: bash
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
@@ -108,11 +108,16 @@ jobs:
           TEXT="$(cat /tmp/text.txt 2>/dev/null || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
-          echo "Prepared outputs: ${COUNT} item(s)"
-          ls -l /tmp/media.json /tmp/out.list 2>/dev/null || true
+          # Клавиатура на сервисное сообщение
+          KBD=$(jq -cn --arg id "${{ steps.inp.outputs.job_id }}" \
+            '{inline_keyboard:[
+              [{"text":"Опубликовать","callback_data":("act=pub&id="+$id)},
+               {"text":"Пересобрать","callback_data":("act=rb&id="+$id)}],
+              [{"text":"Удалить","callback_data":("act=del&id="+$id)}]
+            ]}')
 
+          FIRST_ID=""
           if [ "$COUNT" -gt 1 ]; then
-            [ -s /tmp/media.json ] || { echo "media.json missing"; exit 1; }
             MEDIA_JSON="$(cat /tmp/media.json)"
             FILE_ARGS=()
             i=1
@@ -121,17 +126,28 @@ jobs:
               i=$((i+1))
             done < /tmp/out.list
             # shellcheck disable=SC2068
-            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" -F chat_id="$CHAT" -F "media=$MEDIA_JSON" ${FILE_ARGS[@]}
+            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
+              -F chat_id="$CHAT" -F "media=$MEDIA_JSON" ${FILE_ARGS[@]} > /tmp/resp.json
+            FIRST_ID="$(jq -r '.[0].message_id' /tmp/resp.json)"
           else
             if read -r TYPE FPATH < /tmp/out.list; then
               if [ "${TYPE}" = "photo" ]; then
-                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$FPATH"
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+                  -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$FPATH" > /tmp/resp.json
               elif [ "${TYPE}" = "video" ]; then
-                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$FPATH"
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                  -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$FPATH" > /tmp/resp.json
               else
-                echo "Nothing to send."
+                echo "Nothing to send." ; exit 0
               fi
+              FIRST_ID="$(jq -r '.result.message_id' /tmp/resp.json)"
             else
-              echo "Nothing to send."
+              echo "Nothing to send." ; exit 0
             fi
           fi
+
+          # Сервисное сообщение с кнопками (реплаем на пост)
+          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -H 'content-type: application/json' \
+            -d "$(jq -cn --arg chat "$CHAT" --arg txt "Черновик готов. Что дальше?" --arg mid "$FIRST_ID" --argjson kb "$KBD" \
+                  '{chat_id:$chat, text:$txt, reply_to_message_id:($mid|tonumber), reply_markup:$kb}')"
