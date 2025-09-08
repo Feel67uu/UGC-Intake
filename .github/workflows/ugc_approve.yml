@@ -37,28 +37,31 @@ jobs:
             -d "{\"chat_id\":${{ steps.inp.outputs.inbox_chat_id }},\"message_id\":${{ steps.inp.outputs.inbox_message_id }}}" >/dev/null
 
       - name: Load job json (optional)
-        run: jq . jobs/${{ steps.inp.outputs.job_id }}.json || true
+        run: jq . "jobs/${{ steps.inp.outputs.job_id }}.json" || true
 
-      - name: Trigger Make integration (ИНТЕГРАЦИЯ ПРОК)
-        env:
-          HOOK: ${{ secrets.MAKE_INTEGRATION_WEBHOOK }}
-        run: |
-          ID='${{ steps.inp.outputs.job_id }}'
-          DATA="$(cat jobs/${ID}.json 2>/dev/null || echo '{}')"
-          curl -s -X POST "$HOOK" \
-            -H "x-action: ugc" \
-            -H "x-id: $ID" \
-            -H "content-type: application/json" \
-            -d "$DATA" >/dev/null
+      # ⛔️ УБРАНО: вызов Make
 
-      - name: Update status
+      - name: Update job status (approved/rejected)
         run: |
           ETYPE='${{ steps.inp.outputs.etype }}'
           STATUS="rejected"
           if [ "$ETYPE" = "ugc_approve" ]; then STATUS="approved"; fi
           jq ".status=\"$STATUS\" | .updated_at=(now|todate)" \
-             jobs/${{ steps.inp.outputs.job_id }}.json > /tmp/job.json
-          mv /tmp/job.json jobs/${{ steps.inp.outputs.job_id }}.json
-          git add jobs/${{ steps.inp.outputs.job_id }}.json
+             "jobs/${{ steps.inp.outputs.job_id }}.json" > /tmp/job.json
+          mv /tmp/job.json "jobs/${{ steps.inp.outputs.job_id }}.json"
+          git add "jobs/${{ steps.inp.outputs.job_id }}.json"
           git commit -m "UGC ${STATUS}: ${{ steps.inp.outputs.job_id }}" || true
           git push
+
+      - name: Dispatch build on approve
+        if: steps.inp.outputs.etype == 'ugc_approve'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -n --arg id "${{ steps.inp.outputs.job_id }}" \
+            '{event_type:"ugc_build", client_payload:{job_id:$id}}' > /tmp/dispatch.json
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d @/tmp/dispatch.json >/dev/null
