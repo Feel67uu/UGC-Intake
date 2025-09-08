@@ -109,25 +109,25 @@ jobs:
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
           echo "Prepared outputs: ${COUNT} item(s)"
-          ls -l /tmp/out.list /tmp/media.json 2>/dev/null || true
+          ls -l /tmp/media.json /tmp/out.list 2>/dev/null || true
 
           if [ "$COUNT" -gt 1 ]; then
             [ -s /tmp/media.json ] || { echo "media.json missing"; exit 1; }
             MEDIA_JSON="$(cat /tmp/media.json)"
             FILE_ARGS=()
             i=1
-            while IFS=' ' read -r TYPE PATH; do
-              FILE_ARGS+=(-F "f${i}=@${PATH}")
+            while IFS=' ' read -r TYPE FPATH; do
+              FILE_ARGS+=(-F "f${i}=@${FPATH}")
               i=$((i+1))
             done < /tmp/out.list
             # shellcheck disable=SC2068
             curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" -F chat_id="$CHAT" -F "media=$MEDIA_JSON" ${FILE_ARGS[@]}
           else
-            if read -r TYPE PATH < /tmp/out.list; then
+            if read -r TYPE FPATH < /tmp/out.list; then
               if [ "${TYPE}" = "photo" ]; then
-                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH"
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$FPATH"
               elif [ "${TYPE}" = "video" ]; then
-                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH"
+                curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$FPATH"
               else
                 echo "Nothing to send."
               fi
