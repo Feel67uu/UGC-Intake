@@ -1,6 +1,6 @@
 {
   "job_id": "ugc-20250908-131722-6746",
-  "status": "draft_ugc",
+  "status": "approved",
   "city": "Киселёвск",
   "inbox_message_id": "136",
   "payload": {
@@ -28,5 +28,6 @@
     ],
     "text": "Uuuuuutttfcccfdfghhhh"
   },
-  "created_at": "2025-09-08T13:17:23Z"
+  "created_at": "2025-09-08T13:17:23Z",
+  "updated_at": "2025-09-08T13:17:51Z"
 }
