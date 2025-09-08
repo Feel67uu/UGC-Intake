@@ -1,6 +1,6 @@
 {
   "job_id": "ugc-20250908-140049-2686",
-  "status": "draft_ugc",
+  "status": "rejected",
   "city": "Прокопьевск",
   "inbox_message_id": "139",
   "payload": {
@@ -14,5 +14,6 @@
     "message_id": 277,
     "text": "Gdhdjkf"
   },
-  "created_at": "2025-09-08T14:00:50Z"
+  "created_at": "2025-09-08T14:00:50Z",
+  "updated_at": "2025-09-08T14:01:16Z"
 }
