@@ -28,12 +28,11 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg imagemagick jq curl
+          sudo apt-get install -y ffmpeg imagemagick jq curl python3
 
       - name: Download media from Telegram
         env:
-          # скачиваем тем ботом, который получил исходные file_id (инбокс)
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}   # бот, получавший file_id
         run: |
           mkdir -p work/in work/out
           > /tmp/downloaded.list
@@ -73,54 +72,42 @@ jobs:
             done < /tmp/downloaded.list
           fi
 
-      - name: Send to DRAFT as album or single (via DRAFT bot)
-        shell: bash
-        env:
-          # отправляем ботом, который рулит черновиком
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
+      # формируем media.json в отдельном Python-шаге (никаких heredoc в bash)
+      - name: Build media JSON
+        shell: python
         run: |
-          set -e
+          import json, os, sys
+          text = open('/tmp/text.txt','r',encoding='utf-8').read().strip() if os.path.exists('/tmp/text.txt') else ''
+          lines = open('/tmp/out.list','r',encoding='utf-8').read().strip().splitlines() if os.path.exists('/tmp/out.list') else []
+          items = []
+          for idx, line in enumerate(lines, start=1):
+              typ, path = line.split(' ', 1)
+              t = 'photo' if typ == 'photo' else 'video'
+              it = {'type': t, 'media': f'attach://f{idx}'}
+              if idx == 1 and text:
+                  it['caption'] = text
+              items.append(it)
+          open('/tmp/media.json','w',encoding='utf-8').write(json.dumps(items, ensure_ascii=False))
 
-          # На всякий случай: если куда-то делись curl/jq — дотащим
-          if ! command -v curl >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y curl
-          fi
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y jq
-          fi
-
-          # Пишем отдельный скрипт отправки и нормализуем переводы строк
-          cat >/tmp/send_to_draft.sh <<'SH'
-          #!/usr/bin/env bash
-          set -e
-
+      - name: Send to DRAFT as album or single (via DRAFT bot)
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}   # бот, который постит в черновик
+        run: |
           CHAT="$DRAFT_CHAT"
           TEXT="$(cat /tmp/text.txt 2>/dev/null || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
           if [ "$COUNT" -gt 1 ]; then
-            MEDIA_JSON='[]'
             declare -a FILE_ARGS=()
             i=1
             while read -r TYPE PATH; do
-              [ "$TYPE" = "photo" ] && T="photo" || T="video"
-              CAP=""
-              if [ $i -eq 1 ] && [ -n "$TEXT" ]; then CAP="$TEXT"; fi
-
-              if [ -n "$CAP" ]; then
-                ITEM=$(jq -n --arg t "$T" --arg m "attach://f$i" --arg c "$CAP" '{type:$t, media:$m, caption:$c}')
-              else
-                ITEM=$(jq -n --arg t "$T" --arg m "attach://f$i" '{type:$t, media:$m}')
-              fi
-              MEDIA_JSON=$(jq --argjson it "$ITEM" '. + [$it]' <<<"$MEDIA_JSON")
-
               FILE_ARGS+=(-F "f${i}=@${PATH}")
               i=$((i+1))
             done < /tmp/out.list
 
             /usr/bin/curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
               -F chat_id="$CHAT" \
-              -F "media=$MEDIA_JSON" \
+              -F "media=$(cat /tmp/media.json)" \
               "${FILE_ARGS[@]}" >/dev/null
           else
             read -r TYPE PATH < /tmp/out.list || true
@@ -134,9 +121,3 @@ jobs:
               echo "Nothing to send."
             fi
           fi
-          SH
-
-          # убрать CRLF, если вдруг попали
-          sed -i 's/\r$//' /tmp/send_to_draft.sh
-          chmod +x /tmp/send_to_draft.sh
-          bash /tmp/send_to_draft.sh
