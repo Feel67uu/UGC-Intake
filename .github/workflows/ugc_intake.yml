@@ -45,7 +45,7 @@ jobs:
       - name: Copy to INBOX (single)
         if: steps.p.outputs.has_group == 'no'
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
           TG_INBOX_CHAT_ID: ${{ secrets.TG_INBOX_CHAT_ID }}
         run: |
           RESP=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/copyMessage" \
@@ -58,7 +58,7 @@ jobs:
       - name: Copy to INBOX (album)
         if: steps.p.outputs.has_group == 'yes'
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
           TG_INBOX_CHAT_ID: ${{ secrets.TG_INBOX_CHAT_ID }}
         run: |
           mapfile -t MIDS < /tmp/mids.txt
