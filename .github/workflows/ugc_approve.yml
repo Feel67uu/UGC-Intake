@@ -12,6 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Extract inputs
         id: inp
@@ -29,23 +36,27 @@ jobs:
             -H 'content-type: application/json' \
             -d "{\"chat_id\":${{ steps.inp.outputs.inbox_chat_id }},\"message_id\":${{ steps.inp.outputs.inbox_message_id }}}" >/dev/null
 
-      - name: Load job json
+      - name: Load job json (optional)
         run: jq . jobs/${{ steps.inp.outputs.job_id }}.json || true
 
       - name: Trigger Make integration (ИНТЕГРАЦИЯ ПРОК)
         env:
           HOOK: ${{ secrets.MAKE_INTEGRATION_WEBHOOK }}
         run: |
+          ID='${{ steps.inp.outputs.job_id }}'
+          DATA="$(cat jobs/${ID}.json 2>/dev/null || echo '{}')"
           curl -s -X POST "$HOOK" \
             -H "x-action: ugc" \
-            -H "x-id: ${{ steps.inp.outputs.job_id }}" \
+            -H "x-id: $ID" \
             -H "content-type: application/json" \
-            -d @jobs/${{ steps.inp.outputs.job_id }}.json >/dev/null
+            -d "$DATA" >/dev/null
 
       - name: Update status
         run: |
-          STATUS=${{ steps.inp.outputs.etype == 'ugc_approve' && 'approved' || 'rejected' }}
-          jq ".status=\"${STATUS}\" | .updated_at=(now|todate)" \
+          ETYPE='${{ steps.inp.outputs.etype }}'
+          STATUS="rejected"
+          if [ "$ETYPE" = "ugc_approve" ]; then STATUS="approved"; fi
+          jq ".status=\"$STATUS\" | .updated_at=(now|todate)" \
              jobs/${{ steps.inp.outputs.job_id }}.json > /tmp/job.json
           mv /tmp/job.json jobs/${{ steps.inp.outputs.job_id }}.json
           git add jobs/${{ steps.inp.outputs.job_id }}.json
