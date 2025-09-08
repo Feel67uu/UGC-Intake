@@ -21,11 +21,8 @@ jobs:
         run: |
           FILE="jobs/${{ steps.inp.outputs.job_id }}.json"
           test -f "$FILE" || (echo "job file not found: $FILE"; exit 1)
-          # text -> file
           jq -r '.payload.text // ""' "$FILE" > /tmp/text.txt
-          # media list (type file_id) -> file
           jq -r '.payload.media[]? | "\(.type) \(.file_id)"' "$FILE" > /tmp/media.list || true
-          # pass draft chat id to later step
           echo "DRAFT_CHAT=${{ secrets.TG_DRAFT_CHAT_ID }}" >> $GITHUB_ENV
 
       - name: Install tools
@@ -35,16 +32,18 @@ jobs:
 
       - name: Download media from Telegram
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
         run: |
           mkdir -p work/in work/out
+          > /tmp/downloaded.list
           i=0
           if [ -s /tmp/media.list ]; then
             while read -r TYPE ID; do
               [ -n "$ID" ] || continue
               FP=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=$ID" | jq -r '.result.file_path')
               URL="https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${FP}"
-              EXT="${FP##*.}"; SRC="work/in/${i}.${EXT}"
+              EXT="${FP##*.}"
+              SRC="work/in/${i}.${EXT}"
               curl -s -L -o "$SRC" "$URL"
               echo "$TYPE $SRC" >> /tmp/downloaded.list
               i=$((i+1))
@@ -59,11 +58,15 @@ jobs:
             while read -r TYPE SRC; do
               if [ "$TYPE" = "photo" ]; then
                 DST="work/out/$(basename "${SRC%.*}").jpg"
-                convert "$SRC" -gravity south                   -fill white -undercolor "#00000080" -pointsize 36                   -annotate +0+20 "ПроКис СВЕЖАК" "$DST"
+                convert "$SRC" -gravity south \
+                  -fill white -undercolor "#00000080" -pointsize 36 \
+                  -annotate +0+20 "ПроКис СВЕЖАК" "$DST"
                 echo "photo $DST" >> /tmp/out.list
               else
                 DST="work/out/$(basename "${SRC%.*}").mp4"
-                ffmpeg -y -i "$SRC"                   -vf "drawtext=text='ПроКис СВЕЖАК':fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10:fontsize=28:x=(w-tw)/2:y=h-80"                   -c:a copy "$DST"
+                ffmpeg -y -i "$SRC" \
+                  -vf "drawtext=text='ПроКис СВЕЖАК':fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=10:fontsize=28:x=(w-tw)/2:y=h-80" \
+                  -c:a copy "$DST"
                 echo "video $DST" >> /tmp/out.list
               fi
             done < /tmp/downloaded.list
@@ -74,6 +77,7 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
         run: |
+          set -e
           CHAT="$DRAFT_CHAT"
           TEXT="$(cat /tmp/text.txt || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
@@ -84,20 +88,30 @@ jobs:
             i=1
             while read -r TYPE PATH; do
               [ "$TYPE" = "photo" ] && T="photo" || T="video"
-              CAP=""; if [ $i -eq 1 ] && [ -n "$TEXT" ]; then CAP="$TEXT"; fi
-              ITEM=$(jq -n --arg t "$T" --arg m "attach://f$i" --arg c "$CAP"                      '({type:$t, media:$m} + ( ($c|length) > 0 and {caption:$c} or {} ))')
-              MEDIA_JSON=$(jq --argjson it "$ITEM" '. + [ $it ]' <<<"$MEDIA_JSON")
+              CAP=""
+              if [ $i -eq 1 ] && [ -n "$TEXT" ]; then CAP="$TEXT"; fi
+              if [ -n "$CAP" ]; then
+                ITEM=$(jq -n --arg t "$T" --arg m "attach://f$i" --arg c "$CAP" '{type:$t, media:$m, caption:$c}')
+              else
+                ITEM=$(jq -n --arg t "$T" --arg m "attach://f$i" '{type:$t, media:$m}')
+              fi
+              MEDIA_JSON=$(jq --argjson it "$ITEM" '. + [$it]' <<<"$MEDIA_JSON")
               FILE_ARGS+=(-F "f${i}=@${PATH}")
               i=$((i+1))
             done < /tmp/out.list
 
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup"               -F chat_id="$CHAT"               -F "media=$MEDIA_JSON"               "${FILE_ARGS[@]}" >/dev/null
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
+              -F chat_id="$CHAT" \
+              -F "media=$MEDIA_JSON" \
+              "${FILE_ARGS[@]}" >/dev/null
           else
             read -r TYPE PATH < /tmp/out.list || true
             if [ "$TYPE" = "photo" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto"                 -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" >/dev/null
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" >/dev/null
             elif [ "$TYPE" = "video" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo"                 -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" >/dev/null
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" >/dev/null
             else
               echo "Nothing to send."
             fi
