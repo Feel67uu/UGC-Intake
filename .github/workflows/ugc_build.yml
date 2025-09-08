@@ -33,8 +33,7 @@ jobs:
 
       - name: Download media from Telegram
         env:
-          # скачиваем тем ботом, который видел исходные file_id (инбокс-бот)
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}   # бот из INBOX
         run: |
           mkdir -p work/in work/out
           i=0
@@ -54,7 +53,7 @@ jobs:
       - name: Simple overlays (demo)
         run: |
           mkdir -p work/out
-          > /tmp/out.list
+          : > /tmp/out.list
           if [ -s /tmp/downloaded.list ]; then
             while read -r TYPE SRC; do
               if [ "$TYPE" = "photo" ]; then
@@ -74,34 +73,32 @@ jobs:
           fi
 
       - name: Send to DRAFT as album or single (via DRAFT bot)
-        id: send
         shell: bash
         env:
-          # отправляем тем ботом, который рулит черновиком
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}   # бот черновика
         run: |
           CHAT="$DRAFT_CHAT"
           TEXT="$(cat /tmp/text.txt || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
-          : > /tmp/draft_mid.txt
-
           if [ "$COUNT" -gt 1 ]; then
-            MEDIA_JSON=$(python3 - <<'PY'
-            import json
-            text = open('/tmp/text.txt','r',encoding='utf-8').read()
-            items = []
-            with open('/tmp/out.list','r',encoding='utf-8') as f:
-                for idx,line in enumerate(f, start=1):
-                    typ, path = line.strip().split(' ', 1)
-                    t = 'photo' if typ == 'photo' else 'video'
-                    it = {'type': t, 'media': f'attach://f{idx}'}
-                    if idx == 1 and text.strip():
-                        it['caption'] = text
-                    items.append(it)
-            print(json.dumps(items, ensure_ascii=False))
-            PY
-            )
+            # формируем media JSON в отдельном .py — без heredoc в подстановке
+            cat >/tmp/build_album.py <<'PY'
+import json
+text = open('/tmp/text.txt','r',encoding='utf-8').read()
+items = []
+with open('/tmp/out.list','r',encoding='utf-8') as f:
+    for idx,line in enumerate(f, start=1):
+        typ, path = line.strip().split(' ', 1)
+        t = 'photo' if typ == 'photo' else 'video'
+        it = {'type': t, 'media': f'attach://f{idx}'}
+        if idx == 1 and text.strip():
+            it['caption'] = text
+        items.append(it)
+print(json.dumps(items, ensure_ascii=False))
+PY
+            MEDIA_JSON="$(python3 /tmp/build_album.py)"
+
             declare -a FILE_ARGS=()
             i=1
             while read -r TYPE PATH; do
