@@ -2,77 +2,54 @@ name: UGC Build
 on:
   repository_dispatch:
     types: [ugc_build]
-  workflow_dispatch:
-    inputs:
-      job_id:
-        description: "jobs/<ID>.json (например: ugc-20250908-123456-789)"
-        required: true
-        default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract inputs
         id: inp
-        run: |
-          if [ -n "${{ github.event.inputs.job_id }}" ]; then
-            echo "job_id=${{ github.event.inputs.job_id }}" >> $GITHUB_OUTPUT
-          else
-            echo "job_id=$(jq -r '.client_payload.job_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
-          fi
+        run: echo "job_id=$(jq -r '.client_payload.job_id' $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
 
       - name: Load job json (safe)
         run: |
           FILE="jobs/${{ steps.inp.outputs.job_id }}.json"
-          echo "Using job file: $FILE"
           test -f "$FILE" || (echo "job file not found: $FILE"; exit 1)
           jq -r '.payload.text // ""' "$FILE" > /tmp/text.txt
           jq -r '.payload.media[]? | "\(.type) \(.file_id)"' "$FILE" > /tmp/media.list || true
           echo "DRAFT_CHAT=${{ secrets.TG_DRAFT_CHAT_ID }}" >> $GITHUB_ENV
-          echo "---- job summary ----"
-          jq '{job_id:.job_id, status:.status, city:.city, inbox_message_id:.inbox_message_id, media_count:(.payload.media|length)}' "$FILE" || true
-          echo "---------------------"
 
       - name: Install tools
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ffmpeg imagemagick jq curl python3
 
-      - name: Download media from Telegram (via INBOX bot)
+      - name: Download media from Telegram
         env:
+          # скачиваем тем ботом, который видел исходные file_id (инбокс-бот)
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_INBOX }}
         run: |
           mkdir -p work/in work/out
           i=0
-          > /tmp/downloaded.list
           if [ -s /tmp/media.list ]; then
             while read -r TYPE ID; do
               [ -n "$ID" ] || continue
               FP=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=$ID" | jq -r '.result.file_path')
-              if [ "$FP" = "null" ] || [ -z "$FP" ]; then
-                echo "WARN: getFile returned empty file_path for $ID" >&2
-                continue
-              fi
               URL="https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${FP}"
               EXT="${FP##*.}"
               SRC="work/in/${i}.${EXT}"
-              echo "↓ $TYPE -> $SRC"
               curl -s -L -o "$SRC" "$URL"
-              if [ ! -s "$SRC" ]; then
-                echo "WARN: downloaded file is empty: $SRC" >&2
-                continue
-              fi
               echo "$TYPE $SRC" >> /tmp/downloaded.list
               i=$((i+1))
             done < /tmp/media.list
           fi
-          echo "Downloaded count: $(wc -l < /tmp/downloaded.list || echo 0)"
 
       - name: Simple overlays (demo)
         run: |
@@ -95,12 +72,12 @@ jobs:
               fi
             done < /tmp/downloaded.list
           fi
-          echo "Prepared outputs: $(wc -l < /tmp/out.list || echo 0)"
 
       - name: Send to DRAFT as album or single (via DRAFT bot)
         id: send
         shell: bash
         env:
+          # отправляем тем ботом, который рулит черновиком
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN_DRAFT }}
         run: |
           CHAT="$DRAFT_CHAT"
@@ -111,20 +88,20 @@ jobs:
 
           if [ "$COUNT" -gt 1 ]; then
             MEDIA_JSON=$(python3 - <<'PY'
-import json, sys
-text = open('/tmp/text.txt','r',encoding='utf-8').read()
-items = []
-with open('/tmp/out.list','r',encoding='utf-8') as f:
-    for idx,line in enumerate(f, start=1):
-        typ, path = line.strip().split(' ', 1)
-        t = 'photo' if typ == 'photo' else 'video'
-        it = {'type': t, 'media': f'attach://f{idx}'}
-        if idx == 1 and text.strip():
-            it['caption'] = text
-        items.append(it)
-print(json.dumps(items, ensure_ascii=False))
-PY
-)
+            import json
+            text = open('/tmp/text.txt','r',encoding='utf-8').read()
+            items = []
+            with open('/tmp/out.list','r',encoding='utf-8') as f:
+                for idx,line in enumerate(f, start=1):
+                    typ, path = line.strip().split(' ', 1)
+                    t = 'photo' if typ == 'photo' else 'video'
+                    it = {'type': t, 'media': f'attach://f{idx}'}
+                    if idx == 1 and text.strip():
+                        it['caption'] = text
+                    items.append(it)
+            print(json.dumps(items, ensure_ascii=False))
+            PY
+            )
             declare -a FILE_ARGS=()
             i=1
             while read -r TYPE PATH; do
@@ -132,38 +109,19 @@ PY
               i=$((i+1))
             done < /tmp/out.list
 
-            echo "Sending album of $COUNT items to draft chat $CHAT"
-            curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
               -F chat_id="$CHAT" \
               -F "media=$MEDIA_JSON" \
-              "${FILE_ARGS[@]}" | jq -r '.[0].message_id // empty' > /tmp/draft_mid.txt || true
-
+              "${FILE_ARGS[@]}" >/dev/null
           else
             read -r TYPE PATH < /tmp/out.list || true
             if [ "$TYPE" = "photo" ]; then
-              echo "Sending single photo to draft chat $CHAT"
-              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" | jq -r '.result.message_id // empty' > /tmp/draft_mid.txt || true
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F photo="@$PATH" >/dev/null
             elif [ "$TYPE" = "video" ]; then
-              echo "Sending single video to draft chat $CHAT"
-              curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
-                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" | jq -r '.result.message_id // empty' > /tmp/draft_mid.txt || true
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVideo" \
+                -F chat_id="$CHAT" -F caption="$TEXT" -F video="@$PATH" >/dev/null
             else
               echo "Nothing to send."
             fi
           fi
-
-          DRAFT_MID="$(cat /tmp/draft_mid.txt 2>/dev/null || echo)"
-          echo "draft_mid=$DRAFT_MID" >> $GITHUB_OUTPUT
-          echo "Draft message id: $DRAFT_MID"
-
-      - name: Update job status to ready + store draft message id
-        run: |
-          FILE="jobs/${{ steps.inp.outputs.job_id }}.json"
-          DRAFT_MID='${{ steps.send.outputs.draft_mid }}'
-          jq --arg mid "$DRAFT_MID" '.status="ready" | .draft_message_id=$mid | .updated_at=(now|todate)' \
-            "$FILE" > /tmp/job.json
-          mv /tmp/job.json "$FILE"
-          git add "$FILE"
-          git commit -m "UGC ready: ${{ steps.inp.outputs.job_id }}" || true
-          git push
