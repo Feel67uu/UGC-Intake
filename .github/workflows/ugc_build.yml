@@ -108,7 +108,6 @@ jobs:
           TEXT="$(cat /tmp/text.txt 2>/dev/null || true)"
           COUNT=$(wc -l < /tmp/out.list 2>/dev/null || echo 0)
 
-          # Клавиатура на сервисное сообщение
           KBD=$(jq -cn --arg id "${{ steps.inp.outputs.job_id }}" \
             '{inline_keyboard:[
               [{"text":"Опубликовать","callback_data":("act=pub&id="+$id)},
@@ -125,10 +124,16 @@ jobs:
               FILE_ARGS+=(-F "f${i}=@${FPATH}")
               i=$((i+1))
             done < /tmp/out.list
+
             # shellcheck disable=SC2068
             curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup" \
               -F chat_id="$CHAT" -F "media=$MEDIA_JSON" ${FILE_ARGS[@]} > /tmp/resp.json
-            FIRST_ID="$(jq -r '.[0].message_id' /tmp/resp.json)"
+
+            # В sendMediaGroup результат лежит в .result[0]
+            FIRST_ID="$(jq -r '.result[0].message_id // empty' /tmp/resp.json)"
+            if [ -z "$FIRST_ID" ]; then
+              echo "sendMediaGroup failed, response:"; cat /tmp/resp.json; exit 1
+            fi
           else
             if read -r TYPE FPATH < /tmp/out.list; then
               if [ "${TYPE}" = "photo" ]; then
@@ -140,7 +145,10 @@ jobs:
               else
                 echo "Nothing to send." ; exit 0
               fi
-              FIRST_ID="$(jq -r '.result.message_id' /tmp/resp.json)"
+              FIRST_ID="$(jq -r '.result.message_id // empty' /tmp/resp.json)"
+              if [ -z "$FIRST_ID" ]; then
+                echo "sendPhoto/Video failed, response:"; cat /tmp/resp.json; exit 1
+              fi
             else
               echo "Nothing to send." ; exit 0
             fi
